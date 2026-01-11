@@ -1,0 +1,43 @@
+---
+title: 
+format:
+  html:
+    code-fold: true
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .qmd
+      format_name: quarto
+      format_version: '1.0'
+      jupytext_version: 1.18.1
+  kernelspec:
+    display_name: Python 3 (ipykernel)
+    language: python
+    name: python3
+---
+
+
+```{python}
+import pandas as pd
+import sys
+sys.path.append("..")  # or the absolute path to your workspace root
+from src.stats.calculators import analyze_kpi_distribution
+
+df = pd.read_csv("../data/ao_base.csv", index_col=0)
+
+df
+```
+
+```{python}
+import sys
+sys.path.append("..")  # or the absolute path to your workspace root
+from src.stats.calculators import analyze_kpi_distribution
+
+
+stats = analyze_kpi_distribution(
+    df=df, 
+    column_name='w_ace', 
+    label="First Serve In %", 
+    show_plot=True
+)
+```

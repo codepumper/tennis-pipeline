@@ -1,0 +1,39 @@
+{
+  "name": "Tennis Pipeline (uv + Python 3.13)",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+
+  "features": {
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.13"
+    },
+    "ghcr.io/devcontainers-contrib/features/uv:1": {},
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+      "version": "latest",
+      "enableNonRootDocker": "true"
+    }
+  },
+
+  "remoteUser": "vscode",
+  "overrideCommand": true,
+  "command": ["sleep", "infinity"],
+
+  "forwardPorts": [4200],
+
+  // Automatically install dependencies if a pyproject.toml exists
+  "postCreateCommand": "uv sync",
+
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        // Tells VS Code to use the venv created by uv
+        "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python"
+      },
+      "extensions": [
+        "quarto.quarto",
+        "ms-python.python",
+        "charliermarsh.astral-uv"
+      ]
+    }
+  }
+}

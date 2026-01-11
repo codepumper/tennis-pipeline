@@ -1,0 +1,80 @@
+services:
+  # ---------------------------------------------------------------------------
+  # POSTGRES DATABASE
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:18-alpine
+    container_name: prefect-postgres
+    environment:
+      POSTGRES_USER: prefect
+      POSTGRES_PASSWORD: prefect_password
+      POSTGRES_DB: prefect
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    networks:
+      - etl-network
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prefect"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # PREFECT SERVER
+  # ---------------------------------------------------------------------------
+  prefect-server:
+    image: prefecthq/prefect:3.6.6-python3.14
+    container_name: prefect-server
+    command: prefect server start --host 0.0.0.0 --port 4200 --ui
+    ports:
+      - "5200:4200"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PREFECT_SERVER_API_HOST: "0.0.0.0"
+      PREFECT_SERVER_API_PORT: "4200"
+      PREFECT_UI_SERVE_BASE: "/"
+      # Internal connection to Postgres (service name "postgres")
+      PREFECT_API_DATABASE_CONNECTION_URL: "postgresql+asyncpg://prefect:prefect_password@postgres:5432/prefect"
+      # Internal URL for the Worker to reach the Server
+      PREFECT_API_URL: "http://prefect-server:4200/api" 
+      PREFECT_UI_API_URL: "http://localhost:5200/api"
+    networks:
+      - etl-network
+    restart: on-failure
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4200/api/health')"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # PREFECT WORKER
+  # ---------------------------------------------------------------------------
+  prefect-worker:
+    image: prefecthq/prefect:3.6.6-python3.14
+    container_name: prefect-worker
+    depends_on:
+      prefect-server:
+        condition: service_healthy
+    # Install dependency and start worker for "dev-pool"
+    entrypoint: /bin/bash -c "pip install prefect-docker && prefect worker start --pool dev-pool --type docker"
+    environment:
+      # Connects to the server using the internal docker service name
+      PREFECT_API_URL: "http://prefect-server:4200/api"
+      PREFECT_WORKER_NETWORK: "etl-network"
+    
+    volumes:
+      # Allows spawning sibling containers
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - etl-network
+    restart: on-failure
+
+networks:
+  etl-network:
+    driver: bridge
+    name: etl-network

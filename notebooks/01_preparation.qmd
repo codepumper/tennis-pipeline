@@ -1,0 +1,38 @@
+---
+title: S&P 500 Alpha Discovery
+format:
+  html:
+    code-fold: true
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .qmd
+      format_name: quarto
+      format_version: '1.0'
+      jupytext_version: 1.18.1
+  kernelspec:
+    display_name: Python 3 (ipykernel)
+    language: python
+    name: python3
+---
+
+```{python}
+import pandas as pd
+import glob
+
+# Get all CSV files in the data folder
+csv_files = glob.glob("../data/atp_matches_*.csv")
+print("Files found:", csv_files)
+
+# Read and concatenate all CSVs
+all_dfs = [pd.read_csv(f) for f in csv_files]
+merged_df = pd.concat(all_dfs, ignore_index=True)
+
+display(merged_df)
+```
+
+```{python}
+merged_df[merged_df["tourney_name"] == "Australian Open"]
+merged_df.shape
+```
+
