@@ -44,59 +44,24 @@ This matrix maps live SofaScore fields to the corresponding Sackmann historical 
 | Net Points Won | N/A | Not in standard Sackmann | ❌ Gap |
 | UTR Rating | N/A | Proprietary Sofa/UTR | ❌ Gap |
 
-3. Gap Field Validation Strategies
+## 3. Handling Data Gaps
 
-For fields marked as ❌ Gap, we implement specialized validation approaches:
+For fields marked as ❌ Gap (like Unforced Errors or Winners):
 
-Max Points in a Row (Contextual Logic)
+- **Contextual Baseline**: We cannot use Sackmann for these. Instead, the pipeline will build its own rolling baseline during the 2026 tournament.
+- **Logic**: The first 3 days of AO 2026 will be used to calculate a "Tournament Mean" for Unforced Errors. From Day 4 onwards, Z-score flagging will activate for these fields.
 
-Validation Approach: Physical possibility & match dynamics
-Implementation:
+## 4. Enrichment Implementation (Python/Pydantic)
 
-Flag if streak > 12 points (3 consecutive service games without break)
-Check if streak aligns with match duration (e.g., 10+ points in < 20 minutes = improbable)
-Verify streak distribution (shouldn't be 100% on serve or return)
-Alert Level: WARNING (requires match context review)
-Unforced Errors (Tournament Baseline)
+Every scraped record will be transformed into an augmented JSON before being saved to Parquet:
 
-Validation Approach: Tournament-rolling statistical analysis
-Implementation:
-
-Days 1-3: Collect data, calculate tournament mean/std
-Day 4+: Activate Z-score flagging (µ = tournament mean, σ = tournament std)
-Additional checks: Unforced Errors < Total Points (deterministic)
-Cross-check: Compare opponent UE counts (large disparity flags for review)
-Alert Level: OUTLIER if |Z| > 3.0 after Day 3
-Winners (Forehand/Backhand) (Hybrid Validation)
-
-Validation Approach: Derived ratios with tournament baseline
-Implementation:
-
-text
-1. Check: Winners_FH + Winners_BH ≤ Total Points Won
-2. Ratio check: Winners_FH/Winners_BH within player's historical range (if available)
-3. Statistical: Tournament baseline from Days 1-3, Z-score from Day 4
-4. Extreme check: Flag if winners > 70% of points won (nearly impossible)
-Alert Level: Combined deterministic + probabilistic flags
-Net Points Won (Style-based Logic)
-
-Validation Approach: Player archetype + match context
-Implementation:
-
-text
-1. Check: Net Points Won ≤ Total Net Points Attempted
-2. Player classification:
-   - Serve & Volley players: Expected net points = 25-40% of total points
-   - Baseline players: Expected net points = 5-15% of total points
-3. Statistical: Tournament baseline from Days 1-3
-Alert Level: STYLE_ANOMALY + statistical outlier
-UTR Rating (Format Only)
-
-Validation Approach: Data integrity without statistical comparison
-Implementation:
-
-text
-1. Format: Must be decimal 1.00-16.99
-2. Consistency: Player UTR should not change > 1.0 within tournament
-3. Store only: Used for enrichment, not for outlier detection
-Alert Level: FORMAT_ERROR if invalid, CONSISTENCY_WARNING if large daily change
+```json
+{
+  "player": "Ben Shelton",
+  "stat": "1st_serve_pct",
+  "value": 0.72,
+  "historical_mu": 0.62,
+  "historical_sigma": 0.07,
+  "z_score": 1.42,
+  "status": "CLEAN"
+}
