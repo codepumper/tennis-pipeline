@@ -26,14 +26,40 @@ print("Files found:", csv_files)
 
 # Read and concatenate all CSVs
 all_dfs = [pd.read_csv(f) for f in csv_files]
-merged_df = pd.concat(all_dfs, ignore_index=True)
+df = pd.concat(all_dfs, ignore_index=True)
+```
 
-display(merged_df)
+## filter AO and 2020-2024
+```{python}
+df = df[df["tourney_name"] == "Australian Open"]
+df = df[df['tourney_date']>= 20200101]
+
+df.to_csv("../data/baseline.csv", header = True)
 ```
 
 ```{python}
-merged_df = merged_df[merged_df["tourney_name"] == "Australian Open"]
-merged_df.shape
-merged_df.to_csv("../data/baseline.csv", header = True)
-```
+# Define the mapping
+STAT_CONFIG = {
+    "aces": "ace",
+    "doubleFaults": "df",
+    "firstServePointsAccuracy": "1stWon",
+    "secondServePointsAccuracy": "2ndWon",
+    "breakPointsSaved": "bpSaved"
+}
 
+# 1. Create a dynamic rename dictionary for both winner (w_) and loser (l_) columns
+rename_dict = {"tourney_date": "tourney_date"} # Keep the date
+for new_name, old_suffix in STAT_CONFIG.items():
+    rename_dict[f"w_{old_suffix}"] = f"w_{new_name}"
+    rename_dict[f"l_{old_suffix}"] = f"l_{new_name}"
+
+# 2. Rename the columns present in the dataframe
+df = df.rename(columns=rename_dict)
+
+# 3. Keep only the columns we just renamed
+# We use list(rename_dict.values()) but filter for only those that actually exist in df
+final_columns = [col for col in rename_dict.values() if col in df.columns]
+df = df[final_columns]
+
+df.to_csv("../data/out.csv", index=False)
+```

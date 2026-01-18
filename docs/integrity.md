@@ -98,18 +98,3 @@ For fields marked as ❌ Gap, we implement specialized validation approaches:
 - **Alert Level:** `FORMAT_ERROR` if invalid, `CONSISTENCY_WARNING` if large daily change
 
 
-## 4. Enrichment Implementation (Python/Pydantic)
-
-Every scraped record will be transformed into an augmented JSON before being saved to Parquet:
-
-```json
-{
-  "player": "Ben Shelton",
-  "stat": "1st_serve_pct",
-  "value": 0.72,
-  "historical_mu": 0.62,
-  "historical_sigma": 0.07,
-  "z_score": 1.42,
-  "status": "CLEAN"
-}
-```

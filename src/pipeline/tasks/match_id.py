@@ -33,12 +33,15 @@ def get_match_ids(
         filters = event.get("eventFilters", {})
         genders = filters.get("gender", [])
         categories = filters.get("category", [])
+        status = event.get("status", {})
+        status_type = status.get("type")
         
         # 3. Apply the triple filter: AO + Male + Singles
         if (
             curr_tournament == tournament_name and 
             gender in genders and 
-            category in categories
+            category in categories and
+            status_type == "finished"
         ):
             match_id = event.get("id")
             if match_id:

@@ -1,47 +1,93 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable
+
 import numpy as np
 import pandas as pd
 from scipy.stats import gaussian_kde
 
-def get_kde_metadata(value: float, baseline_data: pd.Series):
-    """
-    Calculates anomaly status using Bounded Kernel Density Estimation.
-    Uses 'Reflection' to correct for the 0-boundary (e.g., for Aces).
-    """
-    if value is None or np.isnan(value) or baseline_data.empty:
-        return {"density": None, "threshold": None, "status": "NOT_EVALUATED"}
+from ..config import P_VALUE_THRESHOLDS
+from ..models.tennis_models import Decision, MetricEvaluation
 
-    # 1. Boundary Correction (Reflection at 0)
-    # We mirror the positive data across the y-axis to fix the 0-leakage
-    data = baseline_data.dropna().values
-    reflected_data = np.concatenate([data, -data])
-    
-    # 2. Fit the KDE
-    # gaussian_kde handles bandwidth automatically via Silverman's Rule
-    kde = gaussian_kde(reflected_data)
-    
-    # 3. Calculate Density (Corrected)
-    # Since we mirrored the data, we must multiply the density by 2 
-    # to maintain an integral of 1 in the positive domain.
-    point_density = kde.evaluate([value])[0] * 2
-    
-    # 4. Determine Dynamic Thresholds (Percentile-based)
-    # We check how likely the known historical values are
-    baseline_densities = kde.evaluate(data) * 2
-    
-    # Thresholds: Bottom 0.5% for Outliers, Bottom 5% for Warnings
-    critical_thresh = np.percentile(baseline_densities, 0.5)
-    warning_thresh = np.percentile(baseline_densities, 5.0)
-    
-    # 5. Determine Status
-    status = "CLEAN"
-    if point_density < critical_thresh:
-        status = "OUTLIER"
-    elif point_density < warning_thresh:
-        status = "WARNING"
-        
-    return {
-        "density": round(float(point_density), 5),
-        "threshold": round(float(critical_thresh), 5),
-        "status": status,
-        "method": "KDE-Reflective"
-    }
+
+@dataclass(slots=True)
+class KDEModel:
+    column: str
+    grid: np.ndarray
+    cdf: np.ndarray
+
+    @classmethod
+    def build(cls, column: str, samples: np.ndarray) -> KDEModel:
+        samples = samples[np.isfinite(samples)]
+        if samples.size == 0:
+            raise ValueError(f"No finite samples available for column '{column}'")
+
+        kde = gaussian_kde(samples)
+
+        span = samples.std(ddof=1) if samples.size > 1 else 1.0
+        if span <= 0:
+            span = 1.0
+        padding = span * 3
+        lower = float(samples.min() - padding)
+        upper = float(samples.max() + padding)
+
+        grid = np.linspace(lower, upper, 1024)
+        pdf = kde(grid)
+        cdf = np.concatenate((
+            [0.0],
+            np.cumsum((pdf[1:] + pdf[:-1]) / 2 * np.diff(grid)),
+        ))
+        cdf /= cdf[-1]
+
+        return cls(column=column, grid=grid, cdf=cdf)
+
+    def cdf_value(self, value: float) -> float:
+        return float(np.interp(value, self.grid, self.cdf, left=0.0, right=1.0))
+
+    def p_value(self, value: float) -> float:
+        cdf_val = self.cdf_value(value)
+        two_tailed = 2 * min(cdf_val, 1 - cdf_val)
+        return float(min(max(two_tailed, 0.0), 1.0))
+
+
+def build_kde_models(
+    baseline_path: str | Path,
+    columns: Iterable[str],
+) -> dict[str, KDEModel]:
+    df = pd.read_csv(baseline_path)
+    models: dict[str, KDEModel] = {}
+    for column in columns:
+        if column not in df:
+            continue
+        samples = df[column].dropna().to_numpy(dtype=float)
+        if samples.size < 5:
+            continue
+        models[column] = KDEModel.build(column, samples)
+    return models
+
+
+def evaluate_metric(
+    column: str,
+    value: float | None,
+    models: dict[str, KDEModel],
+) -> MetricEvaluation:
+    if value is None or not np.isfinite(value):
+        return MetricEvaluation(value=None, p_value=None, status=Decision.NOT_EVALUATED)
+
+    model = models.get(column)
+    if model is None:
+        return MetricEvaluation(value=value, p_value=None, status=Decision.NOT_EVALUATED)
+
+    p_value = model.p_value(value)
+    status = _categorise_p_value(p_value)
+    return MetricEvaluation(value=value, p_value=p_value, status=status)
+
+
+def _categorise_p_value(p_value: float) -> Decision:
+    if p_value <= P_VALUE_THRESHOLDS["error"]:
+        return Decision.ERROR
+    if p_value <= P_VALUE_THRESHOLDS["warning"]:
+        return Decision.WARNING
+    return Decision.CLEAN

@@ -1,103 +1,92 @@
+"""Prefect task for retrieving simplified SofaScore statistics."""
+
+from __future__ import annotations
+
 import random
 import time
-from typing import Dict, Any
+from typing import Any
+
 from curl_cffi import requests
-from prefect import task, get_run_logger
+from prefect import get_run_logger, task
 from prefect.concurrency.sync import rate_limit
 from prefect.cache_policies import NO_CACHE
 
-# --- Configuration ---
-# Maps SofaScore descriptive keys to your Baseline CSV keys
-STAT_CONFIG = {
-    "aces": "ace",
-    "doubleFaults": "df",
-    "firstServeAccuracy": "1stIn",
-    "firstServePointsAccuracy": "1stWon",
-    "secondServePointsAccuracy": "2ndWon",
-    "breakPointsSaved": "bpSaved",
-    "serviceGamesTotal": "SvGms"
-}
+from ..config import SOFASCORE_TO_BASELINE
+
 
 @task(
-    name="fetch_sofascore_stats", 
-    retries=3, 
-    retry_delay_seconds=15, 
-    cache_policy=NO_CACHE
+    name="fetch_match_metrics",
+    retries=3,
+    retry_delay_seconds=15,
+    cache_policy=NO_CACHE,
 )
-def get_match_stats(session: requests.Session, match_id: str) -> dict:
-    """
-    Fetches raw statistics for a specific match from SofaScore.
-    """
+def get_match_stats(session: requests.Session, match_id: str) -> dict[str, float]:
+    """Fetch SofaScore statistics and return winner/loser metrics we track."""
+
     logger = get_run_logger()
     url = f"https://api.sofascore.com/api/v1/event/{match_id}/statistics"
-    
-    # 1. Apply Prefect Rate Limit (Ensures Docker-wide safety)
+
     rate_limit("sofascore-api")
-    
-    # 2. Human-Realistic Headers
+
     headers = {
         "Referer": f"https://www.sofascore.com/event/{match_id}",
         "Accept": "application/json, text/plain, */*",
-        "Connection": "keep-alive"
+        "Connection": "keep-alive",
     }
-    
-    # 3. Random Jitter (Human click-speed simulation)
-    # Increased slightly to be safer during high-traffic AO rounds
+
     time.sleep(random.uniform(5.0, 9.0))
-    
+
     try:
-        resp = session.get(url, headers=headers, timeout=30)
-        
-        if resp.status_code == 403:
-            logger.critical(f"🛑 403 Forbidden on {match_id}. TLS/IP block likely.")
-            resp.raise_for_status() 
-            
-        resp.raise_for_status()
-        raw_json = resp.json()
+        response = session.get(url, headers=headers, timeout=30)
+        if response.status_code == 403:
+            logger.critical("403 Forbidden when fetching %s", match_id)
+            response.raise_for_status()
 
-        # 4. Extract and Map immediately
-        return extract_stats(raw_json)
-
+        response.raise_for_status()
+        payload = response.json()
     except Exception as exc:
-        logger.error(f"Failed to fetch stats for {match_id}: {exc}")
+        logger.error("Failed to fetch stats for %s: %s", match_id, exc)
         raise
 
-def extract_stats(data: dict) -> dict:
-    """
-    Flatten SofaScore JSON and map home/away values to winner/loser.
-    This is a pure function for easier unit testing.
-    """
+    return _extract_metrics(payload)
+
+
+def _extract_metrics(data: dict[str, Any]) -> dict[str, float]:
     try:
-        # Navigate to the correct statistics object
-        # SofaScore usually puts 'ALL' stats at index 0
         stats_all = data["statistics"][0]
     except (KeyError, IndexError, TypeError):
         return {}
 
-    # Flatten nested groups into a single searchable dictionary O(1)
-    raw_map = {
-        item["key"]: item 
-        for group in stats_all["groups"] 
-        for item in group["statisticsItems"]
+    stat_lookup = {
+        item["key"]: item
+        for group in stats_all.get("groups", [])
+        for item in group.get("statisticsItems", [])
     }
 
-    # Determine Winner/Loser based on 'gamesWon'
-    # Default to 0,0 if not found to prevent crashes on abandoned matches
-    h_won, a_won = raw_map.get("gamesWon", {}).get("homeValue", 0), raw_map.get("gamesWon", {}).get("awayValue", 0)
-    
-    # Prefix mapping
-    w_prefix, l_prefix = ("home", "away") if h_won > a_won else ("away", "home")
+    games_item = stat_lookup.get("gamesWon")
+    home_games = _as_float(games_item.get("homeValue")) if games_item else 0.0
+    away_games = _as_float(games_item.get("awayValue")) if games_item else 0.0
+    winner_prefix, loser_prefix = (
+        ("home", "away") if home_games >= away_games else ("away", "home")
+    )
 
-    extracted = {}
-    for sofa_key in STAT_CONFIG.keys():
-        if item := raw_map.get(sofa_key):
-            # Maintain the descriptive SofaScore key names
-            extracted[f"w_{sofa_key}"] = item.get(f"{w_prefix}Value")
-            extracted[f"l_{sofa_key}"] = item.get(f"{l_prefix}Value")
-            
-            # Map 'Total' fields for percentage-based analysis (e.g. Serve Accuracy)
-            if "Total" in item:
-                extracted[f"w_{sofa_key}_total"] = item.get(f"{w_prefix}Total")
-                extracted[f"l_{sofa_key}_total"] = item.get(f"{l_prefix}Total")
+    metrics: dict[str, float] = {}
+    for sofa_key, baseline_suffix in SOFASCORE_TO_BASELINE.items():
+        if sofa_key not in stat_lookup:
+            continue
 
-    return extracted
+        item = stat_lookup[sofa_key]
+        winner_value = _as_float(item.get(f"{winner_prefix}Value"))
+        loser_value = _as_float(item.get(f"{loser_prefix}Value"))
+
+        metrics[f"w_{baseline_suffix}"] = winner_value
+        metrics[f"l_{baseline_suffix}"] = loser_value
+
+    return metrics
+
+
+def _as_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")

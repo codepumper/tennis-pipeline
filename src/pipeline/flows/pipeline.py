@@ -1,105 +1,91 @@
+"""Prefect flow orchestrating the SofaScore ingestion and KDE evaluation."""
+
+from __future__ import annotations
+
+import datetime as _dt
+from pathlib import Path
+from typing import Iterable
+
 import pandas as pd
-import random
-import time
-from typing import Dict, Any
 from curl_cffi import requests
-from prefect import flow, task, get_run_logger
+from prefect import flow, get_run_logger
 
-# Internal Imports
-from src.pipeline.models.tennis_models import AOIntegrityRecord
-from src.pipeline.stats.calculators import calculate_historical_baseline
-from src.pipeline.tasks.match_id import get_match_ids
-from src.pipeline.tasks.match_stats import get_match_stats
-
-# --- 1. Mapping Configuration ---
-# Maps SofaScore descriptive keys to your Baseline CSV keys
-STAT_CONFIG = {
-    "aces": "ace",
-    "doubleFaults": "df",
-    "firstServeAccuracy": "1stIn",
-    "firstServePointsAccuracy": "1stWon",
-    "secondServePointsAccuracy": "2ndWon",
-    "breakPointsSaved": "bpSaved",
-    "serviceGamesTotal": "SvGms"
-}
-
-# --- 2. Logic Functions ---
+from ..config import DEFAULT_BASELINE_PATH, SOFASCORE_TO_BASELINE
+from ..models.tennis_models import Decision, aggregate_status
+from ..stats.calculators import KDEModel, build_kde_models, evaluate_metric
+from ..tasks.match_id import get_match_ids
+from ..tasks.match_stats import get_match_stats
 
 
+def _tracked_columns() -> list[str]:
+    suffixes = set(SOFASCORE_TO_BASELINE.values())
+    return [f"{prefix}_{suffix}" for suffix in sorted(suffixes) for prefix in ("w", "l")]
 
-@task(name="Enrich Match Data")
-def enrich_match_data(match_id: str, extracted_stats: dict, baseline: dict) -> Dict[str, Any]:
-    """Applies historical baseline to SofaScore stats and pivots to an Excel row."""
-    row = {"match_id": match_id}
-    anomalies = []
 
-    for sofa_key, value in extracted_stats.items():
-        # 1. Resolve which baseline key to use
-        # Strip w_ or l_ and look up the mapping in STAT_CONFIG
-        clean_sofa_name = sofa_key.replace("w_", "").replace("l_", "").replace("_total", "")
-        baseline_key = STAT_CONFIG.get(clean_sofa_name)
-        
-        stat_baseline = baseline.get(baseline_key, {})
+def _evaluate_match(
+    match_id: str,
+    metrics: dict[str, float],
+    tracked_columns: Iterable[str],
+    models: dict[str, KDEModel],
+) -> dict[str, object]:
+    row: dict[str, object] = {"match_id": match_id}
+    statuses: list[Decision] = []
 
-        # 2. Pydantic Validation & Z-Score Calculation
-        record = AOIntegrityRecord(
-            match_id=match_id,
-            stat=sofa_key,
-            value=float(value),
-            historical_mu=stat_baseline.get("mean"),
-            historical_sigma=stat_baseline.get("std")
-        )
+    for column in tracked_columns:
+        value = metrics.get(column)
+        evaluation = evaluate_metric(column, value, models)
+        row[column] = evaluation.value
+        row[f"{column}_p_value"] = evaluation.p_value
+        row[f"{column}_status"] = evaluation.status.value
+        statuses.append(evaluation.status)
 
-        # 3. Build Row
-        row.update({
-            sofa_key: record.value,
-            f"{sofa_key}_zscore": round(record.z_score, 2) if record.z_score else None,
-            f"{sofa_key}_status": record.status.value
-        })
-
-        if record.z_score and abs(record.z_score) > 3.5:
-            anomalies.append(f"EXTREME_{sofa_key}")
-
-    row["integrity_flags"] = ", ".join(anomalies) if anomalies else "CLEAN"
+    row["overall_status"] = aggregate_status(statuses).value
     return row
 
-# --- 3. Orchestration Flow ---
 
 @flow(name="AO-2026-Truth-Engine")
-def run_pipeline():
+def run_pipeline(
+    date: str | None = None,
+    baseline_path: str | Path = DEFAULT_BASELINE_PATH,
+    report_path: str | Path = "AO_2026.xlsx",
+) -> None:
     logger = get_run_logger()
-    
-    # Setup resources
-    match_ids = get_match_ids()[:2] # Filters for AO 2026 Men's Singles
-    baseline = calculate_historical_baseline("data/historical/sackmann_atp.csv")
-    final_output = []
 
-    # Use a persistent session to keep the connection 'warm' (Human-Realistic)
+    columns = _tracked_columns()
+    models = build_kde_models(baseline_path, columns)
+    if not models:
+        logger.warning("No KDE models built; results will be marked NOT_EVALUATED")
+
+    resolved_date = None
+    if isinstance(date, str) and date:
+        resolved_date = _dt.date.fromisoformat(date)
+    else:
+        resolved_date = date
+
+    match_ids_future = get_match_ids.submit(date=resolved_date)
+    match_ids = match_ids_future.result()
+    if not match_ids:
+        logger.info("No matches to process")
+        return
+
+    results: list[dict[str, object]] = []
     with requests.Session(impersonate="chrome120") as session:
-        for m_id in match_ids:
+        for match_id in match_ids:
             try:
-                # Step 1: get_stats
-                stats = get_match_stats(session, m_id)
-                
-                # Step 3: Enrich (Prefect Task)
-                if stats:
-                    row = enrich_match_data(m_id, stats, baseline)
-                    final_output.append(row)
-                
-                # Random Jitter between matches
-                time.sleep(random.uniform(4, 9))
-                
-            except Exception as e:
-                logger.error(f"Skipping match {m_id} due to error: {e}")
+                metrics = get_match_stats.fn(session, match_id)
+            except Exception as exc:  # pragma: no cover - Prefect handles logging
+                logger.warning("Skipping match %s due to fetch error: %s", match_id, exc)
                 continue
 
-    # Final Export
-    if final_output:
-        df = pd.DataFrame(final_output)
-        # Reorder: Metadata first, then alphabetical stats
-        cols = ["match_id", "integrity_flags"] + sorted([c for c in df.columns if c not in ["match_id", "integrity_flags"]])
-        df[cols].to_excel("AO_2026_Truth_Report.xlsx", index=False)
-        logger.info(f"Report Generated: {len(final_output)} matches processed.")
+            results.append(_evaluate_match(match_id, metrics, columns, models))
+
+    if results:
+        df = pd.DataFrame(results)
+        df.to_excel(report_path, index=False)
+        logger.info("Report written to %s", report_path)
+    else:
+        logger.info("No results generated; skipping report write")
+
 
 if __name__ == "__main__":
     run_pipeline()
