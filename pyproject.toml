@@ -1,18 +1,24 @@
-[project.scripts]
-run-pipeline = "src.flows.pipeline:run_pipeline"
-
 [project]
 name = "tennis-pipeline"
 version = "0.1.0"
-description = "Add your description here"
+description = "SofaScore AO 2026 Integrity Engine"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "curl-cffi>=0.14.0",
-    "jupyter>=1.1.1",
-    "openpyxl>=3.1.5",
-    "pandas>=2.3.3",
-    "plotly>=6.5.1",
-    "prefect>=3.6.10",
+    "prefect>=3.0.0",
+    "curl-cffi>=0.7.0",
+    "pandas>=2.2.0",
+    "openpyxl>=3.1.0",
+    "streamlit>=1.41.0", # Added streamlit here
+    "plotly>=6.5.2",
     "scipy>=1.17.0",
 ]
+
+[tool.uv]
+managed = true
+package = false
+
+[project.scripts]
+run-pipeline = "src.flows.pipeline:main"
+run-dashboard = "streamlit.web.cli:main"
+

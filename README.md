@@ -16,3 +16,17 @@ set prefect backend to localhost
 ```sh
 prefect config set PREFECT_API_URL="http://localhost:5200/api"
 ```
+
+## Dashboards
+
+Launch the Streamlit app after generating `AO_2026_Report.xlsx`:
+```sh
+uv run run-dashboard
+```
+Use the sidebar text input to point to a different report file when required.
+
+## Pipeline
+
+```sh
+uv run python -m src.flows.pipeline
+```

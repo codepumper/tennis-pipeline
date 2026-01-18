@@ -34,6 +34,6 @@ display(merged_df)
 ```{python}
 merged_df = merged_df[merged_df["tourney_name"] == "Australian Open"]
 merged_df.shape
-merged_df.to_csv("../data/ao_base.csv", header = True)
+merged_df.to_csv("../data/baseline.csv", header = True)
 ```
 

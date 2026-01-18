@@ -5,7 +5,7 @@
             "name": "Python: Pipeline Module",
             "type": "debugpy",
             "request": "launch",
-            "module": "src.flows.pipeline",
+            "module": "src.pipeline.flows.pipeline",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "env": {
