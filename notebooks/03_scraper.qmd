@@ -1,0 +1,357 @@
+---
+title: "AO 2026 Match Scraper Pipeline"
+format:
+  html:
+    code-fold: false
+
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .qmd
+      format_name: quarto
+      format_version: '1.0'
+      jupytext_version: 1.18.1
+  kernelspec:
+    display_name: Python 3 (ipykernel)
+    language: python
+    name: python3
+---
+
+# Overview
+
+This notebook implements a Prefect-driven pipeline that scrapes SofaScore for all men's Australian Open matches on a given day, enriches the statistics with AO 2026 integrity checks, and exports the resulting dataset to an Excel artifact. To keep a low profile with anti-bot systems, every HTTP request uses browser-mimicking TLS fingerprints, randomized headers, and jittered pauses.
+
+## Imports & Configuration
+
+```{python}
+from __future__ import annotations
+
+import json
+import random
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import pandas as pd
+from curl_cffi import requests
+from prefect import flow, task, get_run_logger
+from pydantic import BaseModel, Field
+from enum import Enum
+
+# Project paths
+ROOT = Path("..").resolve()
+DATA_DIR = ROOT / "data"
+INTEGRITY_PATH = DATA_DIR / "integrity_thresholds.json"
+
+# SofaScore API endpoints
+SCHEDULE_ENDPOINT = "https://api.sofascore.com/api/v1/sport/tennis/scheduled-events/{date}"
+STATS_ENDPOINT = "https://api.sofascore.com/api/v1/event/{match_id}/statistics"
+
+# Identification constants for the men's Australian Open
+AO_UNIQUE_SLUG = "australian-open"
+AO_GENDER = "men"
+
+# User-agent rotation to avoid anti-bot detection
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+]
+
+IMPERSONATE_OPTIONS = ["chrome120", "chrome119", "safari17"]
+
+REQUEST_TIMEOUT = 12
+MIN_SLEEP = 1.5
+MAX_SLEEP = 3.5
+```
+
+## Integrity Model Schema
+
+```{python}
+class Plausibility(str, Enum):
+    CLEAN = "CLEAN"
+    WARNING = "WARNING"
+    OUTLIER = "OUTLIER"
+    NOT_EVALUATED = "NOT_EVALUATED"
+
+
+class AOIntegrityRecord(BaseModel):
+    match_id: str
+    match_time_utc: datetime
+    player: str
+    opponent: str
+    stat: str
+    value: float
+    historical_mu: Optional[float] = Field(default=None)
+    historical_sigma: Optional[float] = Field(default=None)
+    z_score: Optional[float] = Field(default=None)
+    status: Plausibility = Plausibility.NOT_EVALUATED
+```
+
+## Helper Utilities
+
+```{python}
+def jitter_sleep() -> None:
+    """Sleep for a random interval to minimize bot detection."""
+    time.sleep(random.uniform(MIN_SLEEP, MAX_SLEEP))
+
+
+def build_headers() -> Dict[str, str]:
+    return {
+        "authority": "api.sofascore.com",
+        "accept": "*/*",
+        "accept-language": "en-US,en;q=0.9",
+        "cache-control": "max-age=0",
+        "origin": "https://www.sofascore.com",
+        "referer": "https://www.sofascore.com/",
+        "user-agent": random.choice(USER_AGENTS),
+    }
+
+
+def match_belongs_to_ao(event: Dict) -> bool:
+    tournament = event.get("tournament", {})
+    unique = tournament.get("uniqueTournament", {})
+    gender = tournament.get("gender", "").lower()
+    return (
+        unique.get("slug") == AO_UNIQUE_SLUG and
+        gender == AO_GENDER
+    )
+
+
+def load_thresholds() -> Dict[str, Dict[str, float]]:
+    if INTEGRITY_PATH.exists():
+        with INTEGRITY_PATH.open("r", encoding="utf-8") as fh:
+            config = json.load(fh)
+        return config.get("probabilistic", {})
+    return {}
+
+
+def evaluate_metric(metric: str, value: Optional[float], thresholds: Dict[str, Dict[str, float]]) -> Dict[str, Optional[float]]:
+    record = {
+        "historical_mu": None,
+        "historical_sigma": None,
+        "z_score": None,
+        "status": Plausibility.NOT_EVALUATED,
+    }
+    stats = thresholds.get(metric)
+    if not stats or value is None:
+        return record
+
+    mu = stats.get("mean")
+    sigma = stats.get("std")
+    if sigma in (None, 0) or mu is None:
+        return record
+
+    z = (value - mu) / sigma
+    abs_z = abs(z)
+    if abs_z > 3.0:
+        status = Plausibility.OUTLIER
+    elif abs_z > 1.5:
+        status = Plausibility.WARNING
+    else:
+        status = Plausibility.CLEAN
+
+    record.update({
+        "historical_mu": mu,
+        "historical_sigma": sigma,
+        "z_score": round(z, 3),
+        "status": status,
+    })
+    return record
+
+
+def safe_div(numerator: Optional[float], denominator: Optional[float]) -> Optional[float]:
+    if numerator is None or denominator in (None, 0):
+        return None
+    return numerator / denominator
+```
+
+## API Tasks
+
+```{python}
+@task(retries=2, retry_delay_seconds=5)
+def fetch_daily_events(target_date: str) -> List[Dict]:
+    logger = get_run_logger()
+    url = SCHEDULE_ENDPOINT.format(date=target_date)
+    logger.info(f"Fetching schedule for {target_date}")
+
+    jitter_sleep()
+    response = requests.get(
+        url,
+        headers=build_headers(),
+        impersonate=random.choice(IMPERSONATE_OPTIONS),
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    payload = response.json()
+
+    events = [event for event in payload.get("events", []) if match_belongs_to_ao(event)]
+    logger.info(f"Discovered {len(events)} AO men's matches")
+    return events
+
+
+@task(retries=3, retry_delay_seconds=6)
+def fetch_match_statistics(match_id: int) -> Dict:
+    logger = get_run_logger()
+    url = STATS_ENDPOINT.format(match_id=match_id)
+    logger.debug(f"Fetching stats for match {match_id}")
+
+    jitter_sleep()
+    response = requests.get(
+        url,
+        headers=build_headers(),
+        impersonate=random.choice(IMPERSONATE_OPTIONS),
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    return response.json()
+```
+
+## Statistic Extraction
+
+```{python}
+STAT_NAME_MAP = {
+    "aces": "aces",
+    "double faults": "double_faults",
+    "1st serve in": "first_in",
+    "1st serve points won": "first_serve_points_won",
+    "2nd serve points won": "second_serve_points_won",
+    "service games": "service_games_won",
+    "break points saved": "bp_saved",
+    "break points faced": "bp_faced",
+    "service points": "serve_points",
+}
+
+
+def normalize_statistics(raw_stats: Dict, event: Dict) -> List[Dict[str, Optional[float]]]:
+    statistics = raw_stats.get("statistics", [])
+    home = event.get("homeTeam", {}).get("name")
+    away = event.get("awayTeam", {}).get("name")
+    match_id = str(event.get("id"))
+    match_time = datetime.fromtimestamp(event.get("startTimestamp", 0))
+
+    players = {
+        "home": {
+            "player": home,
+            "opponent": away,
+        },
+        "away": {
+            "player": away,
+            "opponent": home,
+        },
+    }
+
+    for group in statistics:
+        for item in group.get("statisticsItems", []):
+            label = item.get("name", "").lower()
+            stat_key = STAT_NAME_MAP.get(label)
+            if not stat_key:
+                continue
+            players["home"][stat_key] = item.get("home")
+            players["away"][stat_key] = item.get("away")
+
+    outputs: List[Dict[str, Optional[float]]] = []
+    for payload in players.values():
+        serve_points = payload.get("serve_points")
+        first_in = payload.get("first_in")
+        second_serve_points = None
+        if serve_points is not None and first_in is not None:
+            second_serve_points = serve_points - first_in
+
+        payload["first_serve_pct"] = safe_div(first_in, serve_points)
+        payload["first_serve_points_won_pct"] = safe_div(payload.get("first_serve_points_won"), first_in)
+        payload["second_serve_points_won_pct"] = safe_div(payload.get("second_serve_points_won"), second_serve_points)
+        payload["break_points_saved_pct"] = safe_div(payload.get("bp_saved"), payload.get("bp_faced"))
+        payload["aces_per_service_game"] = safe_div(payload.get("aces"), payload.get("service_games_won"))
+
+        payload.update({
+            "match_id": match_id,
+            "match_time_utc": match_time,
+        })
+        outputs.append(payload)
+
+    return outputs
+```
+
+## Prefect Flow
+
+```{python}
+@flow(name="ao-2026-daily-scrape", retries=0, log_prints=True)
+def scrape_ao_matches(target_date: str, output_excel: Optional[str] = None) -> Path:
+    logger = get_run_logger()
+    thresholds = load_thresholds()
+    events = fetch_daily_events(target_date)
+
+    if not events:
+        logger.warning("No Australian Open men's matches found for the selected date.")
+        raise RuntimeError("No matches to process")
+
+    records: List[AOIntegrityRecord] = []
+
+    for event in events:
+        match_id = event.get("id")
+        if match_id is None:
+            continue
+        try:
+            raw_stats = fetch_match_statistics.submit(match_id).result()
+        except Exception as exc:
+            logger.exception(f"Failed to retrieve stats for match {match_id}: {exc}")
+            continue
+
+        rows = normalize_statistics(raw_stats, event)
+        for row in rows:
+            player = row.get("player")
+            opponent = row.get("opponent")
+            match_uuid = row.get("match_id")
+            match_time = row.get("match_time_utc")
+
+            metric_payloads = {
+                "aces_per_player": row.get("aces"),
+                "double_faults_per_player": row.get("double_faults"),
+                "first_serve_pct": row.get("first_serve_pct"),
+                "first_serve_points_won_pct": row.get("first_serve_points_won_pct"),
+                "second_serve_points_won_pct": row.get("second_serve_points_won_pct"),
+                "break_points_saved_pct": row.get("break_points_saved_pct"),
+                "aces_per_service_game": row.get("aces_per_service_game"),
+            }
+
+            for metric, value in metric_payloads.items():
+                evaluation = evaluate_metric(metric, value, thresholds)
+                record = AOIntegrityRecord(
+                    match_id=match_uuid,
+                    match_time_utc=match_time,
+                    player=player,
+                    opponent=opponent,
+                    stat=metric,
+                    value=value if value is not None else float("nan"),
+                    historical_mu=evaluation["historical_mu"],
+                    historical_sigma=evaluation["historical_sigma"],
+                    z_score=evaluation["z_score"],
+                    status=evaluation["status"],
+                )
+                logger.info(record.model_dump_json())
+                records.append(record)
+
+    if not records:
+        raise RuntimeError("No records produced from the scrape")
+
+    df = pd.DataFrame([record.model_dump() for record in records])
+
+    if output_excel is None:
+        output_excel = f"ao_{target_date}_stats.xlsx"
+    output_path = Path(output_excel).resolve()
+    df.to_excel(output_path, index=False)
+    logger.info(f"Exported {len(df)} rows to {output_path}")
+    return output_path
+```
+
+## Example Invocation
+
+```{python}
+# Example: scrape matches for 2026-01-15 (Day 4)
+# Prefect orchestrates the tasks with built-in logging and retries.
+# Remove or adjust the call below before committing if live scraping is not desired.
+# result_path = scrape_ao_matches("2026-01-15")
+# print(result_path)
+```

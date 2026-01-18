@@ -1,0 +1,439 @@
+---
+title: "AO 2026 Baseline Integrity Thresholds"
+format:
+  html:
+    code-fold: false
+
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .qmd
+      format_name: quarto
+      format_version: '1.0'
+      jupytext_version: 1.18.1
+  kernelspec:
+    display_name: Python 3 (ipykernel)
+    language: python
+    name: python3
+---
+
+# Baseline Strategy
+
+The AO 2026 integrity design couples deterministic business rules with probabilistic thresholds derived from the 2021-2024 Sackmann hard court archive. This notebook reshapes the historical baseline into player-level observations, computes the distributions required for Z-score alerting, and stores the resulting integrity configuration for downstream Prefect flows.
+
+## Load Baseline Data
+
+```{python}
+from pathlib import Path
+import json
+import sys
+import pandas as pd
+
+sys.path.append("..")
+
+DATA_PATH = Path("../data/baseline.csv")
+df_raw = pd.read_csv(DATA_PATH, index_col=0)
+
+# Australian Open hard court sample only
+baseline_matches = df_raw[df_raw["tourney_name"] == "Australian Open"].copy()
+print(f"Loaded {len(baseline_matches)} historical matches")
+```
+
+## Build Player-Level Frame
+
+```{python}
+# shared_columns = [
+#     "tourney_date",
+#     "surface",
+#     "round",
+#     "minutes",
+#     "best_of",
+# ]
+
+# winner_columns = {
+#     "winner_name": "player_name",
+#     "winner_age": "player_age",
+#     "w_ace": "aces",
+#     "w_df": "double_faults",
+#     "w_svpt": "serve_points",
+#     "w_1stIn": "first_in",
+#     "w_1stWon": "first_serve_points_won",
+#     "w_2ndWon": "second_serve_points_won",
+#     "w_bpSaved": "bp_saved",
+#     "w_bpFaced": "bp_faced",
+#     "w_SvGms": "service_games_won",
+# }
+
+# loser_columns = {
+#     "loser_name": "player_name",
+#     "loser_age": "player_age",
+#     "l_ace": "aces",
+#     "l_df": "double_faults",
+#     "l_svpt": "serve_points",
+#     "l_1stIn": "first_in",
+#     "l_1stWon": "first_serve_points_won",
+#     "l_2ndWon": "second_serve_points_won",
+#     "l_bpSaved": "bp_saved",
+#     "l_bpFaced": "bp_faced",
+#     "l_SvGms": "service_games_won",
+# }
+
+```
+
+## Ace Distribution Analysis
+
+```{python}
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import numpy as np
+from scipy import stats
+
+# Extract ace data
+w_ace = baseline_matches['w_ace'].dropna()
+l_ace = baseline_matches['l_ace'].dropna()
+combined_ace = pd.concat([w_ace, l_ace])
+
+# Normality tests
+def normality_test(data, name):
+    """Perform Shapiro-Wilk and Kolmogorov-Smirnov normality tests"""
+    shapiro_stat, shapiro_p = stats.shapiro(data[:5000])  # Shapiro limited to 5000 samples
+    ks_stat, ks_p = stats.kstest(data, 'norm', args=(data.mean(), data.std()))
+    
+    print(f"\n{name} Normality Tests:")
+    print(f"  Shapiro-Wilk: statistic={shapiro_stat:.4f}, p-value={shapiro_p:.4e}")
+    print(f"  Kolmogorov-Smirnov: statistic={ks_stat:.4f}, p-value={ks_p:.4e}")
+    print(f"  Mean: {data.mean():.2f}, Std: {data.std():.2f}")
+    print(f"  Median: {data.median():.2f}, Skewness: {stats.skew(data):.2f}")
+    
+    return shapiro_p, ks_p
+
+# Run normality tests
+w_ace_shapiro_p, w_ace_ks_p = normality_test(w_ace, "Winner Aces")
+l_ace_shapiro_p, l_ace_ks_p = normality_test(l_ace, "Loser Aces")
+combined_shapiro_p, combined_ks_p = normality_test(combined_ace, "Combined Aces")
+```
+
+```{python}
+# Create subplots with distributions
+fig = make_subplots(
+    rows=2, cols=3,
+    subplot_titles=(
+        'Winner Aces - Histogram', 
+        'Loser Aces - Histogram', 
+        'Combined Aces - Histogram',
+        'Winner Aces - Q-Q Plot',
+        'Loser Aces - Q-Q Plot',
+        'Combined Aces - Q-Q Plot'
+    ),
+    vertical_spacing=0.12,
+    horizontal_spacing=0.1
+)
+
+# Histograms with normal curve overlay
+def add_histogram_with_normal(fig, data, row, col, name, color):
+    """Add histogram with normal distribution overlay"""
+    # Histogram
+    fig.add_trace(
+        go.Histogram(
+            x=data,
+            name=name,
+            nbinsx=30,
+            marker_color=color,
+            opacity=0.7,
+            histnorm='probability density',
+            showlegend=False
+        ),
+        row=row, col=col
+    )
+    
+    # Normal curve overlay
+    x_range = np.linspace(data.min(), data.max(), 100)
+    normal_curve = stats.norm.pdf(x_range, data.mean(), data.std())
+    fig.add_trace(
+        go.Scatter(
+            x=x_range,
+            y=normal_curve,
+            name='Normal Fit',
+            line=dict(color='red', width=2, dash='dash'),
+            showlegend=False
+        ),
+        row=row, col=col
+    )
+
+# Q-Q plots
+def add_qq_plot(fig, data, row, col, name, color):
+    """Add Q-Q plot to assess normality"""
+    theoretical_quantiles = stats.probplot(data, dist="norm")[0][0]
+    sample_quantiles = stats.probplot(data, dist="norm")[0][1]
+    
+    # Q-Q scatter
+    fig.add_trace(
+        go.Scatter(
+            x=theoretical_quantiles,
+            y=sample_quantiles,
+            mode='markers',
+            marker=dict(color=color, size=4, opacity=0.6),
+            name=name,
+            showlegend=False
+        ),
+        row=row, col=col
+    )
+    
+    # Reference line
+    line_min = min(theoretical_quantiles.min(), sample_quantiles.min())
+    line_max = max(theoretical_quantiles.max(), sample_quantiles.max())
+    fig.add_trace(
+        go.Scatter(
+            x=[line_min, line_max],
+            y=[line_min, line_max],
+            mode='lines',
+            line=dict(color='red', width=2, dash='dash'),
+            showlegend=False
+        ),
+        row=row, col=col
+    )
+
+# Add all plots
+add_histogram_with_normal(fig, w_ace, 1, 1, 'Winner Aces', 'blue')
+add_histogram_with_normal(fig, l_ace, 1, 2, 'Loser Aces', 'orange')
+add_histogram_with_normal(fig, combined_ace, 1, 3, 'Combined Aces', 'green')
+
+add_qq_plot(fig, w_ace, 2, 1, 'Winner Aces', 'blue')
+add_qq_plot(fig, l_ace, 2, 2, 'Loser Aces', 'orange')
+add_qq_plot(fig, combined_ace, 2, 3, 'Combined Aces', 'green')
+
+# Update layout
+fig.update_layout(
+    title_text="Ace Distribution Analysis with Normality Assessment",
+    height=800,
+    showlegend=False
+)
+
+# Update axes labels
+for i in range(1, 4):
+    fig.update_xaxes(title_text="Number of Aces", row=1, col=i)
+    fig.update_yaxes(title_text="Density", row=1, col=i)
+    fig.update_xaxes(title_text="Theoretical Quantiles", row=2, col=i)
+    fig.update_yaxes(title_text="Sample Quantiles", row=2, col=i)
+
+fig.show()
+```
+
+```{python}
+# Summary statistics
+summary_df = pd.DataFrame({
+    'Metric': ['Count', 'Mean', 'Std', 'Median', 'Q1', 'Q3', 'Min', 'Max', 'Skewness', 'Kurtosis', 
+               'Shapiro p-value', 'KS p-value'],
+    'Winner Aces': [
+        len(w_ace), w_ace.mean(), w_ace.std(), w_ace.median(),
+        w_ace.quantile(0.25), w_ace.quantile(0.75), w_ace.min(), w_ace.max(),
+        stats.skew(w_ace), stats.kurtosis(w_ace),
+        w_ace_shapiro_p, w_ace_ks_p
+    ],
+    'Loser Aces': [
+        len(l_ace), l_ace.mean(), l_ace.std(), l_ace.median(),
+        l_ace.quantile(0.25), l_ace.quantile(0.75), l_ace.min(), l_ace.max(),
+        stats.skew(l_ace), stats.kurtosis(l_ace),
+        l_ace_shapiro_p, l_ace_ks_p
+    ],
+    'Combined Aces': [
+        len(combined_ace), combined_ace.mean(), combined_ace.std(), combined_ace.median(),
+        combined_ace.quantile(0.25), combined_ace.quantile(0.75), combined_ace.min(), combined_ace.max(),
+        stats.skew(combined_ace), stats.kurtosis(combined_ace),
+        combined_shapiro_p, combined_ks_p
+    ]
+})
+
+print("\n=== Ace Distribution Summary ===")
+print(summary_df.to_string(index=False))
+```
+
+## Log Transformation and Normality Re-Assessment
+
+```{python}
+# Apply log1p transformation to ace data
+w_ace_log = np.log1p(w_ace)
+l_ace_log = np.log1p(l_ace)
+combined_ace_log = np.log1p(combined_ace)
+
+# Normality tests after log transformation
+def normality_test_log(data, name):
+    shapiro_stat, shapiro_p = stats.shapiro(data[:5000])
+    ks_stat, ks_p = stats.kstest(data, 'norm', args=(data.mean(), data.std()))
+    print(f"\n{name} (log1p) Normality Tests:")
+    print(f"  Shapiro-Wilk: statistic={shapiro_stat:.4f}, p-value={shapiro_p:.4e}")
+    print(f"  Kolmogorov-Smirnov: statistic={ks_stat:.4f}, p-value={ks_p:.4e}")
+    print(f"  Mean: {data.mean():.2f}, Std: {data.std():.2f}")
+    print(f"  Median: {data.median():.2f}, Skewness: {stats.skew(data):.2f}")
+    return shapiro_p, ks_p
+
+w_ace_log_shapiro_p, w_ace_log_ks_p = normality_test_log(w_ace_log, "Winner Aces")
+l_ace_log_shapiro_p, l_ace_log_ks_p = normality_test_log(l_ace_log, "Loser Aces")
+combined_log_shapiro_p, combined_log_ks_p = normality_test_log(combined_ace_log, "Combined Aces")
+```
+
+```{python}
+# Plot log-transformed distributions and Q-Q plots
+fig_log = make_subplots(
+    rows=2, cols=3,
+    subplot_titles=(
+        'Winner Aces (log1p) - Histogram',
+        'Loser Aces (log1p) - Histogram',
+        'Combined Aces (log1p) - Histogram',
+        'Winner Aces (log1p) - Q-Q Plot',
+        'Loser Aces (log1p) - Q-Q Plot',
+        'Combined Aces (log1p) - Q-Q Plot'
+    ),
+    vertical_spacing=0.12,
+    horizontal_spacing=0.1
+)
+
+add_histogram_with_normal(fig_log, w_ace_log, 1, 1, 'Winner Aces (log1p)', 'blue')
+add_histogram_with_normal(fig_log, l_ace_log, 1, 2, 'Loser Aces (log1p)', 'orange')
+add_histogram_with_normal(fig_log, combined_ace_log, 1, 3, 'Combined Aces (log1p)', 'green')
+
+add_qq_plot(fig_log, w_ace_log, 2, 1, 'Winner Aces (log1p)', 'blue')
+add_qq_plot(fig_log, l_ace_log, 2, 2, 'Loser Aces (log1p)', 'orange')
+add_qq_plot(fig_log, combined_ace_log, 2, 3, 'Combined Aces (log1p)', 'green')
+
+fig_log.update_layout(
+    title_text="Log-Transformed Ace Distribution Analysis with Normality Assessment",
+    height=800,
+    showlegend=False
+)
+
+for i in range(1, 4):
+    fig_log.update_xaxes(title_text="log1p(Number of Aces)", row=1, col=i)
+    fig_log.update_yaxes(title_text="Density", row=1, col=i)
+    fig_log.update_xaxes(title_text="Theoretical Quantiles", row=2, col=i)
+    fig_log.update_yaxes(title_text="Sample Quantiles", row=2, col=i)
+
+fig_log.show()
+```
+
+```{python}
+# Summary statistics for log-transformed data
+summary_log_df = pd.DataFrame({
+    'Metric': ['Count', 'Mean', 'Std', 'Median', 'Q1', 'Q3', 'Min', 'Max', 'Skewness', 'Kurtosis',
+               'Shapiro p-value', 'KS p-value'],
+    'Winner Aces (log1p)': [
+        len(w_ace_log), w_ace_log.mean(), w_ace_log.std(), w_ace_log.median(),
+        w_ace_log.quantile(0.25), w_ace_log.quantile(0.75), w_ace_log.min(), w_ace_log.max(),
+        stats.skew(w_ace_log), stats.kurtosis(w_ace_log),
+        w_ace_log_shapiro_p, w_ace_log_ks_p
+    ],
+    'Loser Aces (log1p)': [
+        len(l_ace_log), l_ace_log.mean(), l_ace_log.std(), l_ace_log.median(),
+        l_ace_log.quantile(0.25), l_ace_log.quantile(0.75), l_ace_log.min(), l_ace_log.max(),
+        stats.skew(l_ace_log), stats.kurtosis(l_ace_log),
+        l_ace_log_shapiro_p, l_ace_log_ks_p
+    ],
+    'Combined Aces (log1p)': [
+        len(combined_ace_log), combined_ace_log.mean(), combined_ace_log.std(), combined_ace_log.median(),
+        combined_ace_log.quantile(0.25), combined_ace_log.quantile(0.75), combined_ace_log.min(), combined_ace_log.max(),
+        stats.skew(combined_ace_log), stats.kurtosis(combined_ace_log),
+        combined_log_shapiro_p, combined_log_ks_p
+    ]
+})
+
+print("\n=== Log-Transformed Ace Distribution Summary ===")
+print(summary_log_df.to_string(index=False))
+```
+
+## Box-Cox Transformation and Normality Re-Assessment
+
+```{python}
+from scipy.stats import boxcox
+
+# Box-Cox requires strictly positive values, so add 1 to all ace counts (if any zeros)
+w_ace_bc, w_ace_lambda = boxcox(w_ace + 1)
+l_ace_bc, l_ace_lambda = boxcox(l_ace + 1)
+combined_ace_bc, combined_ace_lambda = boxcox(combined_ace + 1)
+
+print(f"Winner Aces Box-Cox λ: {w_ace_lambda:.3f}")
+print(f"Loser Aces Box-Cox λ: {l_ace_lambda:.3f}")
+print(f"Combined Aces Box-Cox λ: {combined_ace_lambda:.3f}")
+
+# Normality tests after Box-Cox transformation
+def normality_test_bc(data, name):
+    shapiro_stat, shapiro_p = stats.shapiro(data[:5000])
+    ks_stat, ks_p = stats.kstest(data, 'norm', args=(data.mean(), data.std()))
+    print(f"\n{name} (Box-Cox) Normality Tests:")
+    print(f"  Shapiro-Wilk: statistic={shapiro_stat:.4f}, p-value={shapiro_p:.4e}")
+    print(f"  Kolmogorov-Smirnov: statistic={ks_stat:.4f}, p-value={ks_p:.4e}")
+    print(f"  Mean: {data.mean():.2f}, Std: {data.std():.2f}")
+    print(f"  Median: {np.median(data):.2f}, Skewness: {stats.skew(data):.2f}")
+    return shapiro_p, ks_p
+
+w_ace_bc_shapiro_p, w_ace_bc_ks_p = normality_test_bc(w_ace_bc, "Winner Aces")
+l_ace_bc_shapiro_p, l_ace_bc_ks_p = normality_test_bc(l_ace_bc, "Loser Aces")
+combined_bc_shapiro_p, combined_bc_ks_p = normality_test_bc(combined_ace_bc, "Combined Aces")
+```
+
+```{python}
+# Plot Box-Cox transformed distributions and Q-Q plots
+fig_bc = make_subplots(
+    rows=2, cols=3,
+    subplot_titles=(
+        'Winner Aces (Box-Cox) - Histogram',
+        'Loser Aces (Box-Cox) - Histogram',
+        'Combined Aces (Box-Cox) - Histogram',
+        'Winner Aces (Box-Cox) - Q-Q Plot',
+        'Loser Aces (Box-Cox) - Q-Q Plot',
+        'Combined Aces (Box-Cox) - Q-Q Plot'
+    ),
+    vertical_spacing=0.12,
+    horizontal_spacing=0.1
+)
+
+add_histogram_with_normal(fig_bc, w_ace_bc, 1, 1, 'Winner Aces (Box-Cox)', 'blue')
+add_histogram_with_normal(fig_bc, l_ace_bc, 1, 2, 'Loser Aces (Box-Cox)', 'orange')
+add_histogram_with_normal(fig_bc, combined_ace_bc, 1, 3, 'Combined Aces (Box-Cox)', 'green')
+
+add_qq_plot(fig_bc, w_ace_bc, 2, 1, 'Winner Aces (Box-Cox)', 'blue')
+add_qq_plot(fig_bc, l_ace_bc, 2, 2, 'Loser Aces (Box-Cox)', 'orange')
+add_qq_plot(fig_bc, combined_ace_bc, 2, 3, 'Combined Aces (Box-Cox)', 'green')
+
+fig_bc.update_layout(
+    title_text="Box-Cox Transformed Ace Distribution Analysis with Normality Assessment",
+    height=800,
+    showlegend=False
+)
+
+for i in range(1, 4):
+    fig_bc.update_xaxes(title_text="Box-Cox Transformed", row=1, col=i)
+    fig_bc.update_yaxes(title_text="Density", row=1, col=i)
+    fig_bc.update_xaxes(title_text="Theoretical Quantiles", row=2, col=i)
+    fig_bc.update_yaxes(title_text="Sample Quantiles", row=2, col=i)
+
+fig_bc.show()
+```
+
+```{python}
+# Summary statistics for Box-Cox transformed data
+summary_bc_df = pd.DataFrame({
+    'Metric': ['Count', 'Mean', 'Std', 'Median', 'Q1', 'Q3', 'Min', 'Max', 'Skewness', 'Kurtosis',
+               'Shapiro p-value', 'KS p-value'],
+    'Winner Aces (Box-Cox)': [
+        len(w_ace_bc), w_ace_bc.mean(), w_ace_bc.std(), np.median(w_ace_bc),
+        np.quantile(w_ace_bc, 0.25), np.quantile(w_ace_bc, 0.75), w_ace_bc.min(), w_ace_bc.max(),
+        stats.skew(w_ace_bc), stats.kurtosis(w_ace_bc),
+        w_ace_bc_shapiro_p, w_ace_bc_ks_p
+    ],
+    'Loser Aces (Box-Cox)': [
+        len(l_ace_bc), l_ace_bc.mean(), l_ace_bc.std(), np.median(l_ace_bc),
+        np.quantile(l_ace_bc, 0.25), np.quantile(l_ace_bc, 0.75), l_ace_bc.min(), l_ace_bc.max(),
+        stats.skew(l_ace_bc), stats.kurtosis(l_ace_bc),
+        l_ace_bc_shapiro_p, l_ace_bc_ks_p
+    ],
+    'Combined Aces (Box-Cox)': [
+        len(combined_ace_bc), combined_ace_bc.mean(), combined_ace_bc.std(), np.median(combined_ace_bc),
+        np.quantile(combined_ace_bc, 0.25), np.quantile(combined_ace_bc, 0.75), combined_ace_bc.min(), combined_ace_bc.max(),
+        stats.skew(combined_ace_bc), stats.kurtosis(combined_ace_bc),
+        combined_bc_shapiro_p, combined_bc_ks_p
+    ]
+})
+
+print("\n=== Box-Cox Transformed Ace Distribution Summary ===")
+print(summary_bc_df.to_string(index=False))
+```

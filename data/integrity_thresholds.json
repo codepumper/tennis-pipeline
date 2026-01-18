@@ -1,0 +1,116 @@
+{
+    "metadata": {
+        "matches_sampled": 635,
+        "players_sampled": 1270,
+        "source": "Sackmann ATP Matches 2021-2024"
+    },
+    "deterministic": {
+        "age_logic": {
+            "min_age": 14,
+            "max_yearly_increment": 1
+        },
+        "match_duration_grand_slam": {
+            "best_of": 5,
+            "min_minutes": 45,
+            "max_minutes": 480
+        },
+        "serve_consistency": {
+            "first_in_lte_serve_points": true
+        },
+        "surface_enforcement": {
+            "tournament": "Australian Open",
+            "required_surface": "Outdoor Hard"
+        }
+    },
+    "probabilistic": {
+        "aces_per_player": {
+            "mean": 10.130537974683545,
+            "std": 7.009407841264192,
+            "outlier_limit": 31.15876149847612,
+            "warning_limit": 20.644649736579833
+        },
+        "double_faults_per_player": {
+            "mean": 3.6843354430379747,
+            "std": 2.6832004031790233,
+            "outlier_limit": 11.733936652575045,
+            "warning_limit": 7.70913604780651
+        },
+        "first_serve_pct": {
+            "mean": 0.6376217387608103,
+            "std": 0.06358934895333943,
+            "outlier_limit": 0.8283897856208285,
+            "warning_limit": 0.7330057621908195
+        },
+        "first_serve_points_won_pct": {
+            "mean": 0.7209055822488684,
+            "std": 0.09019503589400805,
+            "outlier_limit": 0.9914906899308925,
+            "warning_limit": 0.8561981360898805
+        },
+        "second_serve_points_won_pct": {
+            "mean": 0.5122007538496505,
+            "std": 0.10049708728062486,
+            "outlier_limit": 0.813692015691525,
+            "warning_limit": 0.6629463847705878
+        },
+        "break_points_saved_pct": {
+            "mean": 0.6103015832686349,
+            "std": 0.21746729005342205,
+            "outlier_limit": 1.2627034534289012,
+            "warning_limit": 0.9365025183487681
+        },
+        "aces_per_service_game": {
+            "mean": 0.5549411491623613,
+            "std": 0.34661786425211305,
+            "outlier_limit": 1.5947947419187003,
+            "warning_limit": 1.0748679455405308
+        }
+    },
+    "gap_fields": {
+        "max_points_in_a_row": {
+            "warning_threshold": 12,
+            "duration_anchor_minutes": 20,
+            "enforce_mixed_context": true,
+            "alert_level": "WARNING"
+        },
+        "unforced_errors": {
+            "minimum_observations_days": 3,
+            "z_score_activation_day": 4,
+            "z_score_cap": 3.0,
+            "deterministic_bounds": {
+                "max_vs_total_points": 1.0
+            },
+            "alert_level": "OUTLIER"
+        },
+        "winners_split": {
+            "ratio_floor": 0.25,
+            "ratio_ceiling": 4.0,
+            "max_share_of_points": 0.7,
+            "z_score_activation_day": 4,
+            "alert_level": "HYBRID"
+        },
+        "net_points_won": {
+            "serve_volley_expectation": [
+                0.25,
+                0.4
+            ],
+            "baseline_expectation": [
+                0.05,
+                0.15
+            ],
+            "tournament_baseline_activation_day": 4,
+            "alert_level": "STYLE_ANOMALY"
+        },
+        "utr_rating": {
+            "valid_range": [
+                1.0,
+                16.99
+            ],
+            "max_day_over_day_delta": 1.0,
+            "alert_levels": {
+                "format": "FORMAT_ERROR",
+                "consistency": "CONSISTENCY_WARNING"
+            }
+        }
+    }
+}

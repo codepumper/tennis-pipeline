@@ -1,0 +1,17 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Pipeline Module",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "src.flows.pipeline",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "PYTHONPATH": "."
+            },
+            "justMyCode": false
+        }
+    ]
+}
